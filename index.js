@@ -64,9 +64,13 @@ bot.on("text", async (ctx) => {
                 reply = "Невідомий тип прогнозу.";
         }
 
-        ctx.reply(reply);
+        ctx.session.weatherInfo = reply;
 
-        // Скидаємо вибір виду прогнозу, щоб можна було обрати знову
+        // Обробка повідомлення з інтерактивною кнопкою для отримання поради від ШІ
+        await ctx.reply(reply, Markup.inlineKeyboard([
+            Markup.button.callback("🤖 Отримати пораду від ШІ", "GET_ADVICE")
+        ]));
+
         ctx.session.forecastType = null;
 
         ctx.reply(
@@ -108,6 +112,31 @@ bot.on("text", async (ctx) => {
             console.error("❌ Помилка GPT:", error);
             ctx.reply("Вибач, сталася помилка. Спробуй пізніше.");
         }
+    }
+});
+
+// Обробка поради від AI
+bot.action("GET_ADVICE", async (ctx) => {
+    await ctx.answerCbQuery();
+
+    if (!ctx.session.weatherInfo) {
+        ctx.reply("На жаль, не можу дати пораду — спочатку запитай прогноз погоди.");
+        return;
+    }
+
+    const prompt = `Дай корисну пораду людині на основі цього прогнозу погоди українською мовою:\n\n${ctx.session.weatherInfo}`;
+
+    try {
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [{ role: "user", content: prompt }],
+        });
+
+        const advice = completion.choices[0].message.content;
+        ctx.reply(`💡 Порада:\n\n${advice}`);
+    } catch (err) {
+        console.error("❌ GPT-помилка:", err);
+        ctx.reply("Вибач, сталася помилка при отриманні поради. Спробуй пізніше.");
     }
 });
 
