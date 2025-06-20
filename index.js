@@ -1,54 +1,100 @@
 import dotenv from "dotenv";
-import { Telegraf } from "telegraf";
+import { Telegraf, Markup, session } from "telegraf";
 import OpenAI from "openai";
+import { getHourlyWeather, getTodayWeather, getFiveDayWeather } from "./weatherService.js";
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+bot.use(session());
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Функція для отримання погоди
-const getWeather = async (city) => {
-    const apiKey = process.env.OPENWEATHER_API_KEY;
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
-        city
-    )}&appid=${apiKey}&units=metric&lang=ua`;
-
-    const response = await fetch(url);
-    if (!response.ok) {
-        throw new Error("Не вдалося отримати дані про погоду");
-    }
-
-    const data = await response.json();
-
-    return `🌤 Погода у місті ${data.name}, ${data.sys.country}:
-Температура: ${data.main.temp}°C
-Відчувається як: ${data.main.feels_like}°C
-Погода: ${data.weather[0].description}
-Вологість: ${data.main.humidity}%
-Вітер: ${data.wind.speed} м/с`;
-};
-
+// Старт з меню вибору виду прогнозу
 bot.start((ctx) => {
-    ctx.reply("Привіт! Напиши назву міста, щоб дізнатися погоду, або запитай мене щось інше.");
+    ctx.session = {};
+    ctx.reply(
+        'Привіт! Я бот "Метеорологічна станція", який допоможе тобі дізнатись актуальну погоду. Обери вид прогнозу.',
+        Markup.keyboard([
+            ["Погода сьогодні"],
+            ["Прогноз на 5 днів"],
+            ["Поквартальний прогноз (3 години)"],
+        ])
+            .resize()
+            .oneTime()
+    );
 });
 
-bot.on("text", async (ctx) => {
-    const userText = ctx.message.text;
+// Обробка вибору виду прогнозу
+bot.hears(["Погода сьогодні", "Прогноз на 5 днів", "Поквартальний прогноз (3 години)"], (ctx) => {
+    ctx.session.forecastType = ctx.message.text;
+    ctx.reply("Напиши, будь ласка, назву міста");
+});
 
-    if (/погода|weather/i.test(userText)) {
-        ctx.reply("🌍 Напиши назву міста, щоб дізнатися погоду (наприклад: `Львів`).");
+// Обробка тексту — вважаємо, що це назва міста
+bot.on("text", async (ctx) => {
+    const userText = ctx.message.text.trim();
+
+    if (!ctx.session.forecastType) {
+        ctx.reply("Будь ласка, спочатку обери вид прогнозу, натиснувши на кнопку.");
+        return;
+    }
+
+    // Якщо користувач випадково повторно натиснув кнопку, не обробляємо
+    if (["Погода сьогодні", "Прогноз на 5 днів", "Поквартальний прогноз (3 години)"].includes(userText)) {
         return;
     }
 
     try {
-        const weather = await getWeather(userText);
-        ctx.reply(weather);
+        let reply = "";
+
+        switch (ctx.session.forecastType) {
+            case "Погода сьогодні":
+                reply = await getTodayWeather(userText);
+                break;
+            case "Прогноз на 5 днів":
+                reply = await getFiveDayWeather(userText);
+                break;
+            case "Поквартальний прогноз (3 години)":
+                reply = await getHourlyWeather(userText);
+                break;
+            default:
+                reply = "Невідомий тип прогнозу.";
+        }
+
+        ctx.reply(reply);
+
+        // Скидаємо вибір виду прогнозу, щоб можна було обрати знову
+        ctx.session.forecastType = null;
+
+        ctx.reply(
+            "Що хочеш дізнатись ще?",
+            Markup.keyboard([
+                ["Погода сьогодні"],
+                ["Прогноз на 5 днів"],
+                ["Поквартальний прогноз (3 години)"],
+            ])
+                .resize()
+                .oneTime()
+        );
+
     } catch (err) {
-        console.log("Не вдалося знайти місто, пробуємо GPT...");
+        console.warn("⚠️ Помилка:", err.message);
+
+        if (
+            err.message.includes("city not found") ||
+            err.message.includes("Nothing to geocode")
+        ) {
+            ctx.reply(`⚠️ Не вдалося знайти місто "${userText}". Перевір, будь ласка, назву.`);
+            return;
+        }
+
+        if (err.message.includes("Invalid API key")) {
+            ctx.reply("❗️ API ключ до OpenWeatherMap недійсний або відсутній.");
+            return;
+        }
 
         try {
             const completion = await openai.chat.completions.create({
@@ -56,10 +102,10 @@ bot.on("text", async (ctx) => {
                 messages: [{ role: "user", content: userText }],
             });
 
-            const reply = completion.choices[0].message.content;
-            ctx.reply(reply);
+            const gptReply = completion.choices[0].message.content;
+            ctx.reply(gptReply);
         } catch (error) {
-            console.error("Помилка GPT:", error);
+            console.error("❌ Помилка GPT:", error);
             ctx.reply("Вибач, сталася помилка. Спробуй пізніше.");
         }
     }
